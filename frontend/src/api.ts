@@ -242,8 +242,28 @@ export class ApiError extends Error {
   }
 }
 
-async function request<T>(url: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(url, init)
+/**
+ * Backend origin. Empty in development (Vite proxies /api to port 8000).
+ * In production set VITE_API_BASE in frontend/.env before `npm run build`, e.g. https://api.example.com
+ */
+export const API_BASE = ((import.meta.env.VITE_API_BASE as string | undefined) ?? '').replace(/\/+$/, '')
+
+/** Absolute URL for an API path. */
+export function url(path: string): string {
+  return `${API_BASE}${path}`
+}
+
+async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  const res = await fetch(url(path), init)
+  const type = res.headers.get('content-type') ?? ''
+  if (type.includes('text/html')) {
+    throw new ApiError(
+      res.status,
+      API_BASE
+        ? `The API at ${API_BASE} answered with a web page, not JSON. Check VITE_API_BASE points at the backend.`
+        : 'The request reached the web server instead of the API. Set VITE_API_BASE to the backend address and rebuild the frontend.',
+    )
+  }
   if (!res.ok) {
     let message = res.statusText
     try {
@@ -336,7 +356,7 @@ export const api = {
   uploadDirect: (file: File, mode: Mode, onProgress?: (pct: number) => void) =>
     new Promise<RecordDetail>((resolve, reject) => {
       const xhr = new XMLHttpRequest()
-      xhr.open('POST', `/api/records/upload?mode=${mode}`)
+      xhr.open('POST', url(`/api/records/upload?mode=${mode}`))
       xhr.upload.onprogress = (e) => {
         if (e.lengthComputable && onProgress) onProgress(Math.round((e.loaded / e.total) * 100))
       }
@@ -359,8 +379,8 @@ export const api = {
       form.append('file', file)
       xhr.send(form)
     }),
-  fileUrl: (id: number) => `/api/records/${id}/file`,
-  exportUrl: () => '/api/records/export.csv',
+  fileUrl: (id: number) => url(`/api/records/${id}/file`),
+  exportUrl: () => url('/api/records/export.csv'),
 
   // Bulk upload
   batches: (params: Record<string, string | number | undefined>) => request<Page<Batch>>(`/api/batches?${qs(params)}`),
@@ -381,7 +401,7 @@ export const api = {
   createBatch: (files: File[], mode: Mode, name: string, onProgress?: (pct: number) => void) =>
     new Promise<Batch>((resolve, reject) => {
       const xhr = new XMLHttpRequest()
-      xhr.open('POST', `/api/batches?mode=${mode}&name=${encodeURIComponent(name)}`)
+      xhr.open('POST', url(`/api/batches?mode=${mode}&name=${encodeURIComponent(name)}`))
       xhr.upload.onprogress = (e) => {
         if (e.lengthComputable && onProgress) onProgress(Math.round((e.loaded / e.total) * 100))
       }

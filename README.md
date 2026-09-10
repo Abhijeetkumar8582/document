@@ -170,6 +170,13 @@ running backend, including tampered-signature checks.
 | GET | `/api/batches/summary` | queue depth, processing, dead count, workers |
 | POST | `/api/batches/{id}/retry`, `/api/batches/{id}/cancel`, `/api/jobs/{id}/retry` | requeue dead jobs, cancel waiting jobs, requeue one job |
 
+## Deploying
+
+One host runs everything: uvicorn serves the API and the built frontend on port 8000, so the browser uses a single
+origin and needs no API address or CORS setup. Step-by-step instructions for the EC2 host, the systemd unit, and the
+setup and update scripts are in [deploy/DEPLOY.md](deploy/DEPLOY.md). `backend/.env` is never committed; create it
+on the server.
+
 ## Production notes
 
 - Set `allow_origins` in `backend/app/main.py` to the real frontend origin and put the API behind authentication.

@@ -6,4 +6,9 @@ __pycache__/
 backend/data/
 backend/uploads/
 backend-dev.log
+backend-dev.err.log
 .env
+.env.*
+!.env.example
+!.env.s3.example
+.claude/

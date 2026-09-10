@@ -1,6 +1,11 @@
 [
   {
-    "AllowedOrigins": ["http://localhost:5173", "https://registrar.example.com"],
+    "AllowedOrigins": [
+      "http://localhost:5173",
+      "http://127.0.0.1:5173",
+      "http://15.207.14.33",
+      "http://15.207.14.33:8000"
+    ],
     "AllowedMethods": ["GET", "POST", "HEAD"],
     "AllowedHeaders": ["*"],
     "ExposeHeaders": ["ETag"],

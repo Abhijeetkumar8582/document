@@ -1,0 +1,16 @@
+[Unit]
+Description=Registrar API and frontend
+After=network.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/opt/registrar/backend
+# Settings, keys and bucket config live in /opt/registrar/backend/.env (never in git).
+ExecStart=/opt/registrar/backend/.venv/bin/python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 1
+Restart=always
+RestartSec=3
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target
