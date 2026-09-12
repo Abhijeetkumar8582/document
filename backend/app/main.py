@@ -11,6 +11,7 @@ from fastapi.staticfiles import StaticFiles
 from . import models, worker  # noqa: F401  (models registers tables)
 from .database import migrate
 from .routers import audit_log, batches, dashboard, records, uploads
+from .services import storage
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(name)s: %(message)s")
 
@@ -19,6 +20,7 @@ migrate()
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
+    storage.sync_bucket_cors(_origins)
     worker.pool.start()
     yield
     worker.pool.stop()
@@ -34,7 +36,10 @@ app = FastAPI(
 # Browser origins allowed to call this API. Comma-separated in CORS_ORIGINS; add the deployed frontend's origin there.
 _origins = [
     o.strip()
-    for o in os.getenv("CORS_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173,http://15.207.14.33,http://15.207.14.33:8000").split(",")
+    for o in os.getenv(
+        "CORS_ORIGINS",
+        "http://localhost:5173,http://127.0.0.1:5173,http://localhost:8000,http://127.0.0.1:8000,http://15.207.14.33,http://15.207.14.33:8000",
+    ).split(",")
     if o.strip()
 ]
 app.add_middleware(
@@ -64,14 +69,17 @@ _dist = Path(os.getenv("FRONTEND_DIST", Path(__file__).resolve().parent.parent.p
 if (_dist / "index.html").exists():
     app.mount("/assets", StaticFiles(directory=_dist / "assets"), name="assets")
 
+    _root = _dist.resolve()
+
     @app.get("/{path:path}", include_in_schema=False)
     def spa(path: str):
         if path.startswith("api/"):
             raise HTTPException(404, "Not found")
-        candidate = _dist / path
-        if path and candidate.is_file():
+        # Only files inside dist/ are ever served; "../backend/.env" style paths fall back to the app shell.
+        candidate = (_root / path).resolve()
+        if path and candidate.is_relative_to(_root) and candidate.is_file():
             return FileResponse(candidate)
-        return FileResponse(_dist / "index.html")
+        return FileResponse(_root / "index.html")
 
     logging.getLogger("registrar").info("serving frontend from %s", _dist)
 else:

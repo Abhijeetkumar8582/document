@@ -14,6 +14,8 @@ class Record(Base):
     file_type: Mapped[str] = mapped_column(String(50))
     file_size: Mapped[int] = mapped_column(Integer, default=0)
     stored_path: Mapped[str] = mapped_column(String(500))
+    # Content hash of the original file; duplicate detection keys on this, never on job rows.
+    sha256: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     page_count: Mapped[int] = mapped_column(Integer, default=0)
 
     # Which engine read the file and how sure it was.

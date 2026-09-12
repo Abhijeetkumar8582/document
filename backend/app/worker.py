@@ -22,6 +22,46 @@ from .services import ingest, queue, storage
 log = logging.getLogger("registrar.worker")
 
 
+class _Heartbeat:
+    """Renews the job's lease on a timer, independent of how chatty the pipeline is about progress.
+
+    A single Gemini or OCR call can run longer than the lease; without this the janitor would hand the
+    job to a second worker while the first is still on it.
+    """
+
+    def __init__(self, job_id: int) -> None:
+        self.job_id = job_id
+        self.stage = "starting"
+        self.done = 0
+        self.total = 0
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, name=f"heartbeat-{job_id}", daemon=True)
+
+    def __enter__(self) -> _Heartbeat:
+        self._thread.start()
+        return self
+
+    def __exit__(self, *_exc) -> None:
+        self._stop.set()
+        self._thread.join(timeout=5)
+
+    def progress(self, stage: str, done: int, total: int) -> None:
+        self.stage, self.done, self.total = stage, done, total
+        self._beat()
+
+    def _beat(self) -> None:
+        try:
+            with SessionLocal() as db:
+                queue.heartbeat(db, self.job_id, self.stage, self.done, self.total)
+        except Exception:
+            log.exception("heartbeat for job %d failed", self.job_id)
+
+    def _run(self) -> None:
+        interval = max(5.0, worker_settings.lease_seconds / 3)
+        while not self._stop.wait(interval):
+            self._beat()
+
+
 class WorkerPool:
     def __init__(self) -> None:
         self._stop = threading.Event()
@@ -39,6 +79,9 @@ class WorkerPool:
             repaired = queue.repair_batches(db)
             if repaired:
                 log.info("re-rolled status for %d open batch(es)", repaired)
+            hashed = queue.backfill_record_hashes(db)
+            if hashed:
+                log.info("computed content hashes for %d older record(s)", hashed)
         for i in range(max(1, worker_settings.concurrency)):
             t = threading.Thread(target=self._run, name=f"worker-{i}", daemon=True)
             t.start()
@@ -92,37 +135,24 @@ class WorkerPool:
                 time.sleep(worker_settings.poll_seconds)
 
     def _process(self, job_id: int, worker_id: str) -> None:
-        with SessionLocal() as db:
+        with SessionLocal() as db, _Heartbeat(job_id) as beat:
             job = db.get(models.Job, job_id)
             if job is None:
                 return
             store = storage.get_storage()
-            last_beat = {"t": 0.0}
-
-            def progress(stage: str, done: int, total: int) -> None:
-                now = time.time()
-                if now - last_beat["t"] < 1.0 and done < total:
-                    return  # do not hammer the database on tight loops
-                last_beat["t"] = now
-                with SessionLocal() as hb:
-                    queue.heartbeat(hb, job_id, stage, done, total)
 
             # -- fetch bytes -------------------------------------------------------------
-            progress("reading", 0, 1)
-            incoming_path = None
+            beat.progress("reading", 0, 1)
+            if job.source != "storage":
+                queue.fail(db, job, "This job predates direct-to-storage uploads and cannot be resumed. Upload the file again.", permanent=True)
+                return
             try:
-                if job.source == "storage":
-                    data = store.get(job.stored_path)
-                    key = job.stored_path
-                else:
-                    incoming_path = queue.INCOMING_DIR / job.stored_path
-                    if not incoming_path.exists():
-                        queue.fail(db, job, "The stored file is missing from disk.", permanent=True)
-                        return
-                    data = incoming_path.read_bytes()
-                    key = storage.new_key(job.file_name.split("/")[-1])
-            except storage.StorageError as exc:
+                data = store.get(job.stored_path)
+            except storage.StorageNotFound as exc:
                 queue.fail(db, job, f"The uploaded object is missing from storage: {exc}", permanent=True)
+                return
+            except storage.StorageError as exc:
+                queue.fail(db, job, f"Storage is not reachable right now: {exc}")  # transient: retry with backoff
                 return
 
             if not job.sha256:
@@ -133,6 +163,8 @@ class WorkerPool:
             # Same bytes filed before? Point at that record instead of creating a twin.
             dup = queue.find_duplicate(db, job.sha256, job.id)
             if dup:
+                if not queue._still_mine(db, job):
+                    return
                 job.status = "skipped"
                 job.duplicate_of = dup
                 job.record_id = dup
@@ -140,19 +172,17 @@ class WorkerPool:
                 job.finished_at = datetime.utcnow()
                 queue._rollup(db, job.batch_id)
                 db.commit()
-                if job.source == "storage":
+                try:
                     store.delete(job.stored_path)  # the twin object is not needed
-                elif incoming_path:
-                    incoming_path.unlink(missing_ok=True)
+                except Exception:
+                    log.warning("could not delete duplicate object %s", job.stored_path)
                 return
 
             # -- extract and file -----------------------------------------------------------
             try:
                 rec = ingest.build_record(
-                    data, job.file_name.split("/")[-1], job.content_type, job.mode, progress=progress, stored_name=key
+                    data, job.file_name.split("/")[-1], job.content_type, job.mode, progress=beat.progress, stored_name=job.stored_path
                 )
-                if incoming_path is not None:
-                    store.move_in(incoming_path, key)  # incoming/ -> permanent store (disk or bucket)
                 ingest.save(db, rec)
                 db.add(
                     models.AuditEvent(
@@ -163,14 +193,18 @@ class WorkerPool:
                         client_ip=None,
                     )
                 )
-                queue.complete(db, job, rec.id)
-                log.info("job %d filed as record %d by %s", job.id, rec.id, worker_id)
+                if queue.complete(db, job, rec.id):
+                    log.info("job %d filed as record %d by %s", job.id, rec.id, worker_id)
+                else:
+                    log.warning("job %d finished by %s after its lease was lost; result discarded", job.id, worker_id)
             except ingest.IngestError as exc:
                 db.rollback()
                 job = db.get(models.Job, job_id)
-                queue.fail(db, job, str(exc), permanent=exc.permanent)
-                if exc.permanent and job.source == "storage":
-                    store.delete(job.stored_path)
+                if queue.fail(db, job, str(exc), permanent=exc.permanent) and exc.permanent:
+                    try:
+                        store.delete(job.stored_path)
+                    except Exception:
+                        log.warning("could not delete rejected object %s", job.stored_path)
             except Exception as exc:  # network blips, rate limits, transient IO
                 db.rollback()
                 job = db.get(models.Job, job_id)

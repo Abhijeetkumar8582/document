@@ -11,7 +11,7 @@ import time
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, UploadFile
-from fastapi.responses import FileResponse, RedirectResponse
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
@@ -19,7 +19,7 @@ from sqlalchemy.orm import Session, selectinload
 from .. import audit, models, schemas
 from ..config import settings
 from ..database import get_db
-from ..services import extractor, ingest, storage
+from ..services import extractor, ingest, queue, storage
 from .records import _detail
 
 router = APIRouter(prefix="/api", tags=["uploads"])
@@ -103,14 +103,16 @@ def presign_upload(body: PresignRequest, request: Request):
 
 
 @router.post("/uploads/local/{key:path}", status_code=204)
-async def local_upload_target(key: str, file: UploadFile, exp: int = Query(...), sig: str = Query(...)):
+def local_upload_target(key: str, file: UploadFile, exp: int = Query(...), sig: str = Query(...)):
     """The POST target a local presign hands out. Not used when STORAGE_BACKEND=s3."""
     store = storage.get_storage()
     if store.backend != "local":
         raise HTTPException(404, "Local uploads are disabled; the bucket accepts uploads directly.")
     if not storage.valid_key(key) or not store.verify("put", key, exp, sig):
         raise HTTPException(403, "This upload link is invalid or has expired. Ask for a new one.")
-    data = await file.read()
+    if store.exists(key):
+        raise HTTPException(409, "This upload link has already been used. Ask for a new one.")
+    data = file.file.read()
     if not data:
         raise HTTPException(400, "The uploaded file is empty.")
     if len(data) > settings.max_upload_bytes:
@@ -123,11 +125,15 @@ def record_from_upload(body: FromUploadRequest, request: Request, db: Session = 
     """Turn an object already in storage into a record. The file is never re-uploaded through the API."""
     if not storage.valid_key(body.key) or not body.key.startswith("records/"):
         raise HTTPException(400, "Invalid storage key.")
+    if queue.key_in_use(db, body.key):
+        raise HTTPException(409, "That upload has already been filed. Upload the file again to create a new record.")
     store = storage.get_storage()
     try:
         data = store.get(body.key)
-    except storage.StorageError as exc:
+    except storage.StorageNotFound as exc:
         raise HTTPException(404, f"Nothing was uploaded for that key yet: {exc}") from exc
+    except storage.StorageError as exc:
+        raise HTTPException(503, _storage_problem(store, exc)) from exc
     if len(data) > settings.max_upload_bytes:
         store.delete(body.key)
         raise HTTPException(413, "The uploaded object is larger than the allowed size and was removed.")
@@ -177,7 +183,7 @@ def preview_url(record_id: int, request: Request, db: Session = Depends(get_db))
 
 
 @router.get("/files/{key:path}")
-def serve_local_file(key: str, exp: int = Query(...), sig: str = Query(...), as_: str = Query("inline", alias="as")):
+def serve_local_file(key: str, exp: int = Query(...), sig: str = Query(...), as_: str = Query("inline", alias="as"), name: str = Query("")):
     """Serves a locally stored object from a signed link. Not used when STORAGE_BACKEND=s3."""
     store = storage.get_storage()
     local = store if store.backend == "local" else store._legacy  # S3 mode still serves pre-switch files from disk
@@ -189,5 +195,6 @@ def serve_local_file(key: str, exp: int = Query(...), sig: str = Query(...), as_
         raise HTTPException(404, "File not found.")
     ext = path.suffix.lower()
     media = "application/pdf" if ext == ".pdf" else IMAGE_MIME.get(ext, "application/octet-stream")
-    headers = {"Content-Disposition": f'{disposition}; filename="{path.name}"', "Cache-Control": f"private, max-age={max(0, exp - int(time.time()))}"}
+    shown = (name or path.name).replace('"', "").replace("\r", "").replace("\n", "")[:150] or path.name
+    headers = {"Content-Disposition": f'{disposition}; filename="{shown}"', "Cache-Control": f"private, max-age={max(0, exp - int(time.time()))}"}
     return FileResponse(path, media_type=media, headers=headers)

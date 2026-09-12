@@ -29,20 +29,28 @@ export default function AuditLog() {
   const [params, setParams] = useSearchParams()
   const action = params.get('action') ?? ''
   const recordId = params.get('record') ?? ''
-  const page = Math.max(1, Number(params.get('page') ?? 1))
+  const page = Math.max(1, Math.floor(Number(params.get('page'))) || 1)
   const [data, setData] = useState<AuditPage | null>(null)
   const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
+    let live = true
+    setError(null)
     api
       .audit({ action, record_id: recordId, page, page_size: PAGE_SIZE })
-      .then(setData)
-      .catch((e) => setError(e.message))
+      .then((d) => live && setData(d))
+      .catch((e) => live && setError(e.message))
+    return () => {
+      live = false
+    }
   }, [action, recordId, page])
 
   const set = (patch: Record<string, string | undefined>) => {
     const next = new URLSearchParams(params)
-    for (const [k, v] of Object.entries(patch)) (v ? next.set(k, v) : next.delete(k))
+    for (const [k, v] of Object.entries(patch)) {
+      if (v) next.set(k, v)
+      else next.delete(k)
+    }
     if (!('page' in patch)) next.delete('page')
     setParams(next)
   }

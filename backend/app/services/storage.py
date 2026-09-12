@@ -43,7 +43,11 @@ class PresignedGet:
 
 
 class StorageError(Exception):
-    pass
+    """Storage could not do what was asked (network, credentials, permissions). Usually worth retrying."""
+
+
+class StorageNotFound(StorageError):
+    """The object is definitely not there. Retrying will not help."""
 
 
 def new_key(filename: str, prefix: str = "records") -> str:
@@ -87,7 +91,7 @@ class LocalStorage:
     def get(self, key: str) -> bytes:
         p = self._path(key)
         if not p.exists():
-            raise StorageError("Object not found.")
+            raise StorageNotFound("Object not found.")
         return p.read_bytes()
 
     def exists(self, key: str) -> bool:
@@ -130,11 +134,14 @@ class LocalStorage:
         )
 
     def presign_get(self, key: str, filename: str, content_type: str | None, inline: bool) -> PresignedGet:
+        from urllib.parse import quote
+
         exp = int(time.time()) + settings.presign_expires
         disposition = "inline" if inline else "attachment"
         sig = self.sign("get", key, exp, disposition)
+        # The real filename rides along (unsigned, cosmetic) so downloads are named like the upload.
         return PresignedGet(
-            url=f"{settings.public_api_base}/api/files/{key}?exp={exp}&sig={sig}&as={disposition}",
+            url=f"{settings.public_api_base}/api/files/{key}?exp={exp}&sig={sig}&as={disposition}&name={quote(filename)}",
             expires_at=exp,
         )
 
@@ -168,23 +175,36 @@ class S3Storage:
         self.client.put_object(Bucket=self.bucket, Key=key, Body=data, **extra)
 
     def move_in(self, src: Path, key: str) -> None:
-        self.client.upload_file(str(src), self.bucket, key)
+        from .extractor import MIME
+
+        ctype = MIME.get(src.suffix.lower())
+        self.client.upload_file(str(src), self.bucket, key, ExtraArgs={"ContentType": ctype} if ctype else None)
         src.unlink(missing_ok=True)
+
+    @staticmethod
+    def _is_missing(exc: Exception) -> bool:
+        """Only a definite 404/NoSuchKey means missing. Anything else (network, auth, throttling) is an outage."""
+        code = str(getattr(exc, "response", {}).get("Error", {}).get("Code", ""))
+        return code in ("404", "NoSuchKey", "NotFound")
 
     def _in_bucket(self, key: str) -> bool:
         try:
             self.client.head_object(Bucket=self.bucket, Key=key)
             return True
-        except Exception:
-            return False
+        except Exception as exc:
+            if self._is_missing(exc):
+                return False
+            raise StorageError(f"{type(exc).__name__}: {exc}") from exc
 
     def get(self, key: str) -> bytes:
         try:
             return self.client.get_object(Bucket=self.bucket, Key=key)["Body"].read()
         except Exception as exc:
+            if not self._is_missing(exc):
+                raise StorageError(f"{type(exc).__name__}: {exc}") from exc
             if self._legacy.exists(key):
                 return self._legacy.get(key)
-            raise StorageError("Object not found.") from exc
+            raise StorageNotFound("Object not found.") from exc
 
     def exists(self, key: str) -> bool:
         return self._in_bucket(key) or self._legacy.exists(key)
@@ -212,7 +232,8 @@ class S3Storage:
     def presign_get(self, key: str, filename: str, content_type: str | None, inline: bool) -> PresignedGet:
         if not self._in_bucket(key) and self._legacy.exists(key):
             return self._legacy.presign_get(key, filename, content_type, inline)
-        disposition = "inline" if inline else f'attachment; filename="{filename}"'
+        safe = filename.replace('"', "").replace("\r", "").replace("\n", "")[:150]
+        disposition = "inline" if inline else f'attachment; filename="{safe}"'
         params = {"Bucket": self.bucket, "Key": key, "ResponseContentDisposition": disposition}
         if content_type:
             params["ResponseContentType"] = content_type
@@ -228,6 +249,47 @@ def get_storage() -> LocalStorage | S3Storage:
     if _storage is None:
         _storage = S3Storage() if settings.storage_backend == "s3" else LocalStorage()
     return _storage
+
+
+def sync_bucket_cors(origins: list[str]) -> None:
+    """Make sure browsers can POST presigned uploads to the bucket from wherever the app is served.
+
+    Runs at startup when STORAGE_BACKEND=s3 and S3_MANAGE_CORS is not "false". Presigned signatures are the
+    access control, so the rule allows any origin ("*") and the bucket itself stays private. Other CORS rules
+    on the bucket are left alone. Failures are logged, never fatal: the app still starts without it.
+    """
+    del origins  # the rule is origin-agnostic by design; kept in the signature for callers
+    import logging
+    import os
+
+    log = logging.getLogger("registrar.storage")
+    if settings.storage_backend != "s3" or os.getenv("S3_MANAGE_CORS", "true").lower() in ("0", "false", "no"):
+        return
+    try:
+        store = get_storage()
+        if not isinstance(store, S3Storage):
+            return
+        client = store.client
+        try:
+            rules = client.get_bucket_cors(Bucket=store.bucket)["CORSRules"]
+        except Exception as exc:
+            if getattr(exc, "response", {}).get("Error", {}).get("Code") != "NoSuchCORSConfiguration":
+                raise
+            rules = []
+        rule = next((r for r in rules if "POST" in r.get("AllowedMethods", [])), None)
+        if rule is None:
+            rule = {"AllowedOrigins": [], "AllowedMethods": ["GET", "POST", "HEAD"], "AllowedHeaders": ["*"], "ExposeHeaders": ["ETag"], "MaxAgeSeconds": 3000}
+            rules.append(rule)
+        have = set(rule.get("AllowedOrigins", []))
+        if "*" in have:
+            log.info("bucket %s CORS already allows any origin", store.bucket)
+            return
+        missing = ["*"]
+        rule["AllowedOrigins"] = ["*"]
+        client.put_bucket_cors(Bucket=store.bucket, CORSConfiguration={"CORSRules": rules})
+        log.info("bucket %s CORS: added %s", store.bucket, ", ".join(missing))
+    except Exception as exc:
+        log.warning("could not sync bucket CORS (%s). Browser uploads may be blocked until the rule is applied by hand.", exc)
 
 
 def status() -> dict:

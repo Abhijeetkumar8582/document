@@ -25,10 +25,10 @@ export default function BatchDetail() {
   const [busy, setBusy] = useState(false)
 
   const load = useCallback(() => {
-    Promise.all([api.batch(batchId), api.batchJobs(batchId, { status: filter, page_size: 500 })])
+    Promise.all([api.batch(batchId), api.allBatchJobs(batchId, filter || undefined)])
       .then(([b, j]) => {
         setBatch(b)
-        setJobs(j.items)
+        setJobs(j)
       })
       .catch((e) => setError(e.message))
   }, [batchId, filter])

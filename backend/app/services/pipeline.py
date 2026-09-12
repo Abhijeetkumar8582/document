@@ -10,7 +10,7 @@ Every step taken is written to `notes` so the UI can show why an engine was chos
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Callable
+from collections.abc import Callable
 
 from ..config import settings
 from . import extractor, google_docai, llm_vision
@@ -18,7 +18,7 @@ from . import extractor, google_docai, llm_vision
 ENGINES = {
     "text": "Text layer",
     "google_docai": "Google Document AI",
-    "llm_vision": "Gemini vision",
+    "llm_vision": "Local LLM Cloud",
     "ocr": "Local OCR",
 }
 MODES = ("auto", "text", "google_docai", "llm_vision", "ocr")
@@ -87,7 +87,6 @@ def process(
             notes.append(f"Text layer: only {chars:,} characters on {layer.page_count} page(s). Treated as a scan.")
     else:
         notes.append("Image upload. No text layer to read.")
-    page_count = layer.page_count if layer else 1
 
     # 2. Google Document AI
     if mode in ("auto", "google_docai"):
@@ -131,7 +130,7 @@ def process(
                 tick("llm vision", 0, len(images))
                 res = llm_vision.read_pages(images, on_page=lambda i, n: tick("gemini vision", i, n))
                 notes.append(
-                    f"Gemini vision ({res.model}): read {len(res.pages)} page(s), "
+                    f"Local LLM Cloud ({res.model}): read {len(res.pages)} page(s), "
                     f"{len(res.subjects)} subject row(s) returned."
                 )
                 ex = extractor.Extraction(
@@ -143,11 +142,11 @@ def process(
                 )
                 return Processed(ex, "llm_vision", None, notes, model=res.model)
             except llm_vision.VisionError as exc:
-                notes.append(f"Gemini vision: {exc}")
+                notes.append(f"Local LLM Cloud: {exc}")
                 if mode == "llm_vision":
                     raise ProcessingError(str(exc)) from exc
         else:
-            notes.append("Gemini vision: GEMINI_API_KEY not set, skipped.")
+            notes.append("Local LLM Cloud: GEMINI_API_KEY not set, skipped.")
             if mode == "llm_vision":
                 raise ProcessingError("Gemini is not configured: set GEMINI_API_KEY on the server.", permanent=True)
 

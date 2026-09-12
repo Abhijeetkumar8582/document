@@ -23,10 +23,6 @@ class UnsupportedFile(Exception):
     pass
 
 
-class OcrUnavailable(Exception):
-    pass
-
-
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".tif", ".tiff", ".bmp"}
 MIME = {
     ".pdf": "application/pdf",

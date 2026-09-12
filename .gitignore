@@ -12,3 +12,6 @@ backend-dev.err.log
 !.env.example
 !.env.s3.example
 .claude/
+backend/*-key.json
+backend/*.json
+!backend/package.json

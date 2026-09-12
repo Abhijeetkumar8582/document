@@ -5,7 +5,7 @@ import io
 import json
 import re
 from dataclasses import dataclass, field
-from typing import Callable
+from collections.abc import Callable
 
 from ..config import settings
 

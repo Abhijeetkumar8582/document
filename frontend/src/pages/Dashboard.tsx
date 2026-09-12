@@ -21,9 +21,11 @@ export default function Dashboard() {
   const [days, setDays] = useState(30)
   const [data, setData] = useState<Data | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [attempt, setAttempt] = useState(0)
 
   useEffect(() => {
     let live = true
+    setError(null)
     api
       .dashboard(days)
       .then((d) => live && setData(d))
@@ -31,7 +33,7 @@ export default function Dashboard() {
     return () => {
       live = false
     }
-  }, [days])
+  }, [days, attempt])
 
   // Keep the queue tiles fresh while anything is running.
   useEffect(() => {
@@ -40,7 +42,15 @@ export default function Dashboard() {
     return () => clearInterval(t)
   }, [data, days])
 
-  if (error) return <Notice kind="error">{error}</Notice>
+  if (error && !data)
+    return (
+      <div className="mx-auto max-w-6xl">
+        <Notice kind="error">{error}</Notice>
+        <button className="btn-ghost mt-3" onClick={() => setAttempt((n) => n + 1)}>
+          Try again
+        </button>
+      </div>
+    )
   if (!data) return <Skeleton rows={5} />
 
   const delta = data.added_last_7 - data.added_prev_7

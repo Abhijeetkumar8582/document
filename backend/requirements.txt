@@ -12,3 +12,5 @@ google-genai==2.22.0
 google-cloud-documentai==3.0.1
 
 boto3==1.35.90
+requests==2.32.3
+reportlab==4.2.5

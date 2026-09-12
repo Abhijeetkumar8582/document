@@ -35,8 +35,23 @@ export default function RecordDetail() {
   const [preview, setPreview] = useState<Preview | null | 'missing'>(null)
   const [showPreview, setShowPreview] = useState(false)
 
+  // A new id means a new record: drop anything belonging to the previous one, including an open edit draft.
   useEffect(() => {
-    api.get(Number(id)).then(setRec).catch((e) => setError(e.message))
+    let live = true
+    setRec(null)
+    setDraft(null)
+    setError(null)
+    setPreview(null)
+    setShowPreview(false)
+    setConfirmDelete(false)
+    setTab('subjects')
+    api
+      .get(Number(id))
+      .then((r) => live && setRec(r))
+      .catch((e) => live && setError(e.message))
+    return () => {
+      live = false
+    }
   }, [id])
 
   useEffect(() => {
@@ -49,18 +64,23 @@ export default function RecordDetail() {
   // Fetch a fresh signed link when the document is shown, and again if it expires while open.
   useEffect(() => {
     if ((tab !== 'document' && !showPreview) || !rec) return
+    let live = true
     let timer: number | undefined
     const load = () =>
       api
         .preview(rec.id)
         .then((p) => {
+          if (!live) return
           setPreview(p)
           const ms = Math.max(30_000, p.expires_at * 1000 - Date.now() - 30_000)
           timer = window.setTimeout(load, ms)
         })
-        .catch(() => setPreview('missing'))
+        .catch(() => live && setPreview('missing'))
     load()
-    return () => window.clearTimeout(timer)
+    return () => {
+      live = false
+      window.clearTimeout(timer)
+    }
   }, [tab, showPreview, rec])
 
   const beginEdit = () => {

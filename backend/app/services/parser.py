@@ -60,14 +60,17 @@ GRADE_RE = re.compile(
 NUM_RE = re.compile(r"^-?\d+(?:\.\d+)?$")
 CODE_RE = re.compile(r"^[A-Z]{2,6}[-\s]?\d{2,5}[A-Z]{0,2}$|^\d{2,4}[A-Z]{1,3}\d{0,4}$")
 NUMERIC_CODE_RE = re.compile(r"^\d{3,6}$")
-SSN_RE = re.compile(r"\b(?!000|666|9\d{2})\d{3}[- ](?!00)\d{2}[- ](?!0000)\d{4}\b")
-DOB_LINE_RE = re.compile(r"(?im)^(.*\b(?:date\s+of\s+birth|dob|birth\s*date)\b\s*[:\-]?\s*)(\S.*)$")
+SSN_RE = re.compile(r"\b(?!000|666|9\d{2})\d{3}[-. ](?!00)\d{2}[-. ](?!0000)\d{4}\b")
+# Unseparated or oddly punctuated SSNs only count when labelled, so nine-digit student IDs survive.
+SSN_LABELLED_RE = re.compile(r"(?i)\b(?:ssn|social\s+security(?:\s+(?:number|no\.?|#))?)\s*[:#\-]?\s*(\d[\d\-. ]{7,12}\d)")
+DOB_LINE_RE = re.compile(r"(?im)^(.*\b(?:date\s+of\s+birth|d\.?\s?o\.?\s?b\.?|birth\s*date|born(?:\s+on)?)(?![a-z])\s*[:\-]?\s*)(\S.*)$")
 
 LABELS: dict[str, list[str]] = {
     "student_name": [
         r"(?:student'?s?|candidate'?s?)\s*name",
         r"name\s+of\s+(?:the\s+)?(?:student|candidate)",
-        r"name",
+        # A bare "Name:" label, but never a parent's, guardian's or teacher's.
+        r"(?<!father's )(?<!mother's )(?<!guardian's )(?<!parent's )(?<!father )(?<!mother )(?<!guardian )(?<!teacher )(?<!principal )(?<!examiner )name",
     ],
     "roll_number": [
         r"student\s*(?:id|number|no\.?|#)",
@@ -129,6 +132,14 @@ META_LINE = re.compile(
     re.I,
 )
 LABELLED_VALUE = re.compile(r"^[A-Za-z .()/&-]{2,40}\s*[:=]\s*\S+$")
+# When one line carries two fields ("Name: Sam Okafor   Student ID: NG-2210"), cut before the next label. Only
+# real label words count, so a surname followed by spaces is never mistaken for a label.
+NEXT_LABEL_RE = re.compile(
+    r"\s{2,}|\t|\s+(?=(?:student|candidate|roll|reg(?:istration)?|enrol\w*|id|class|course|program\w*|degree|major|branch|"
+    r"term|semester|sem|quarter|year|session|date|dob|result|status|standing|grade|father|mother|guardian|school|college|"
+    r"university|institution)\b[^:\n]{0,25}:)",
+    re.I,
+)
 
 
 def _clean(value: str) -> str:
@@ -153,9 +164,11 @@ def _to_num(value) -> float | None:
 
 def redact_pii(text: str) -> tuple[str, bool]:
     """Strip SSNs and dates of birth. FERPA/state law: never keep these in the register."""
-    redacted, n = SSN_RE.subn("[SSN redacted]", text)
+    redacted, n = SSN_LABELLED_RE.subn(lambda mt: mt.group(0)[: mt.start(1) - mt.start(0)] + "[SSN redacted]", text)
+    redacted, n2 = SSN_RE.subn("[SSN redacted]", redacted)
     redacted, m = DOB_LINE_RE.subn(lambda mt: mt.group(1) + "[redacted]", redacted)
-    return redacted, bool(n or m)
+    # The vision model redacts at the source and writes "[redacted]"; count that too.
+    return redacted, bool(n or n2 or m or "[redacted]" in text.lower())
 
 
 def _find_label(text: str, patterns: list[str]) -> str | None:
@@ -164,11 +177,11 @@ def _find_label(text: str, patterns: list[str]) -> str | None:
         m = rx.search(text)
         if m:
             candidate = _clean(m.group(1))
-            candidate = re.split(r"\s{2,}|\t|\s+(?=[A-Za-z][A-Za-z .]{2,30}\s*:)", candidate)[0]
+            candidate = NEXT_LABEL_RE.split(candidate)[0]
             if candidate and len(candidate) < 120:
                 return _clean(candidate)
         rx_inline = re.compile(
-            r"(?im)\b(?:" + pattern + r")\s*[:\-]\s*([^:\n]{2,80}?)(?=\s{2,}|\s+[A-Za-z][A-Za-z .]{1,30}\s*[:\-]|$)"
+            r"(?im)\b(?:" + pattern + r")\s*[:\-]\s*([^:\n]{2,80}?)(?=\s{2,}|\s+(?:student|candidate|roll|reg(?:istration)?|enrol\w*|id|class|course|program\w*|degree|major|branch|term|semester|sem|quarter|year|session|date|dob|result|status|standing|grade|father|mother|guardian|school|college|university|institution)\b[^:\n]{0,25}[:\-]|$)"
         )
         m = rx_inline.search(text)
         if m:
@@ -376,7 +389,7 @@ def parse(extraction: Extraction) -> ParsedRecord:
     for field_name, patterns in LABELS.items():
         setattr(rec, field_name, _find_label(text, patterns))
 
-    lines = [l.strip() for l in text.splitlines() if l.strip()]
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
     if not rec.institution:
         for line in lines[:12]:
             if INSTITUTION_HINTS.search(line) and len(line) < 100 and ":" not in line:

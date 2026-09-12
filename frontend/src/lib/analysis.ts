@@ -5,7 +5,7 @@
  * poll the batch until every job is terminal. The server does the reading, so even a full page reload
  * loses nothing: sessions with a batch id are remembered in sessionStorage and resume polling on load.
  */
-import { api, type Job, type Mode, type RecordDetail } from '../api'
+import { api, ApiError, type Job, type Mode, type RecordDetail } from '../api'
 
 export type Phase = 'uploading' | 'queuing' | 'processing' | 'done' | 'error'
 
@@ -36,7 +36,7 @@ type Listener = () => void
 
 const STORAGE_KEY = 'registrar.analysis.sessions'
 const POLL_MS = 1500
-const UPLOAD_PARALLEL = 3
+const UPLOAD_PARALLEL = 6
 
 let sessions: Session[] = []
 let overlaySession: string | null = null
@@ -121,7 +121,7 @@ export const analysis = {
           sessions = sessions.map((s) => (s.id === id ? { ...s, files: s.files.map((f) => ({ ...f, uploadPct: pct })) } : s))
           emit()
         })
-        const jobs = await api.batchJobs(batch.id, { page_size: 500 })
+        const jobs = { items: await api.allBatchJobs(batch.id) }
         update(id, {
           phase: 'processing',
           batchId: batch.id,
@@ -192,24 +192,37 @@ function startPolling(id: string) {
     const s = sessions.find((x) => x.id === id)
     if (!s || !s.batchId) return
     try {
-      const [batch, jobs] = await Promise.all([api.batch(s.batchId), api.batchJobs(s.batchId, { page_size: 500 })])
-      // Match jobs to file tasks by name (order is preserved by the server), or append unknown ones.
+      const [batch, jobItems] = await Promise.all([api.batch(s.batchId), api.allBatchJobs(s.batchId)])
+      // A task keeps the job it already has (refreshed by id); unclaimed tasks take the first unclaimed job with
+      // the same name. Names can repeat (two "scan.pdf" from different folders) or be truncated server-side, so a
+      // task that never matches falls back to positional order as a last resort. Indexed so 5,000 files stay cheap.
+      const byId = new Map(jobItems.map((j) => [j.id, j]))
+      const byName = new Map<string, Job[]>()
+      for (const j of jobItems) byName.set(j.file_name, [...(byName.get(j.file_name) ?? []), j])
+      const used = new Set<number>()
       let files = s.files.map((f) => {
-        const job = jobs.items.find((j) => j.file_name === f.name && !s.files.some((o) => o !== f && o.job?.id === j.id)) ?? f.job
+        let job = f.job ? byId.get(f.job.id) : undefined
+        if (!job) job = (byName.get(f.name) ?? []).find((j) => !used.has(j.id))
+        if (job) used.add(job.id)
         return job ? { ...f, job } : f
       })
-      // Records for newly filed jobs.
+      const spare = jobItems.filter((j) => !used.has(j.id))
+      files = files.map((f) => (f.job || f.uploadError || !spare.length ? f : { ...f, job: spare.shift() }))
+      // Records for newly filed jobs. A record deleted mid-batch is not an error for the batch.
       const need = files.filter((f) => f.job?.record_id && !f.record)
       if (need.length) {
         const fetched = await Promise.all(
           need.map(async (f) => {
             const rid = f.job!.record_id!
-            if (!recordCache.has(rid)) recordCache.set(rid, await api.get(rid))
-            return [f.id, recordCache.get(rid)!] as const
+            if (!recordCache.has(rid)) {
+              const rec = await api.get(rid).catch(() => null)
+              if (rec) recordCache.set(rid, rec)
+            }
+            return [f.id, recordCache.get(rid) ?? null] as const
           }),
         )
         const byId = new Map(fetched)
-        files = files.map((f) => (byId.has(f.id) ? { ...f, record: byId.get(f.id) } : f))
+        files = files.map((f) => (byId.get(f.id) ? { ...f, record: byId.get(f.id)! } : f))
       }
       const finished = batch.status !== 'running' && batch.status !== 'queued'
       update(id, { files, phase: finished ? 'done' : 'processing' })
@@ -217,7 +230,13 @@ function startPolling(id: string) {
         stopPolling(id)
         return
       }
-    } catch {
+    } catch (e) {
+      // The batch itself is gone: stop rather than poll forever.
+      if (e instanceof ApiError && e.status === 404) {
+        update(id, { phase: 'error', error: e.message })
+        stopPolling(id)
+        return
+      }
       /* transient; try again next tick */
     }
     pollers.set(id, window.setTimeout(tick, POLL_MS))
@@ -232,12 +251,15 @@ try {
     const saved = JSON.parse(raw) as { id: string; name: string; mode: Mode; startedAt: number; batchId: number }[]
     for (const s of saved) {
       sessions.push({ ...s, phase: 'processing', files: [] })
-      api.batchJobs(s.batchId, { page_size: 500 }).then((jobs) => {
-        update(s.id, {
-          files: jobs.items.map((j) => ({ id: `${s.id}-${j.id}`, name: j.file_name, size: j.file_size, type: '', uploadPct: 100, key: 'resumed', job: j })),
+      api
+        .allBatchJobs(s.batchId)
+        .then((jobs) => {
+          update(s.id, {
+            files: jobs.map((j) => ({ id: `${s.id}-${j.id}`, name: j.file_name, size: j.file_size, type: '', uploadPct: 100, key: 'resumed', job: j })),
+          })
+          startPolling(s.id)
         })
-        startPolling(s.id)
-      })
+        .catch((e) => update(s.id, { phase: 'error', error: (e as Error).message }))
     }
   }
 } catch {

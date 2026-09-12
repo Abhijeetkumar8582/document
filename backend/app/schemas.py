@@ -1,4 +1,5 @@
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict
 
@@ -74,8 +75,8 @@ class RecordUpdate(BaseModel):
     result_status: str | None = None
     gpa: float | None = None
     credits_earned: float | None = None
-    grade_scale: str | None = None
-    review_status: str | None = None
+    grade_scale: Literal["4.0", "percentage", "other"] | None = None
+    review_status: Literal["verified", "needs_review"] | None = None
     subjects: list[SubjectIn] | None = None
 
 

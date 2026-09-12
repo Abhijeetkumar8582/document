@@ -1,5 +1,5 @@
 import { Download, ExternalLink, FileWarning, Loader2 } from 'lucide-react'
-import type { Preview } from '../api'
+import { absolute, type Preview } from '../api'
 
 /**
  * Shows the original upload inline from a short-lived signed link.
@@ -49,7 +49,7 @@ export function DocumentPreview({
         <span className="ml-auto font-mono text-[11px] text-slate-400" title={`Signed link valid until ${expires.toLocaleTimeString('en-US')}`}>
           {preview.backend === 's3' ? 'served from bucket' : 'served locally'} · link renews automatically
         </span>
-        <a href={preview.url} target="_blank" rel="noreferrer" className="btn-ghost px-2 py-1 text-xs">
+        <a href={absolute(preview.url)} target="_blank" rel="noreferrer" className="btn-ghost px-2 py-1 text-xs">
           <ExternalLink size={13} /> Open
         </a>
         <a href={downloadUrl} className="btn-ghost px-2 py-1 text-xs">
@@ -60,14 +60,14 @@ export function DocumentPreview({
       {preview.kind === 'pdf' && (
         <iframe
           key={preview.url}
-          src={`${preview.url}#toolbar=1&view=FitH`}
+          src={`${absolute(preview.url)}#toolbar=1&view=FitH`}
           title={`Preview of ${fileName}`}
           className="block h-[78vh] w-full bg-slate-100"
         />
       )}
       {preview.kind === 'image' && (
         <div className="flex justify-center bg-slate-100 p-4">
-          <img key={preview.url} src={preview.url} alt={`Scan: ${fileName}`} className="max-h-[78vh] w-auto max-w-full rounded shadow-lift" />
+          <img key={preview.url} src={absolute(preview.url)} alt={`Scan: ${fileName}`} className="max-h-[78vh] w-auto max-w-full rounded shadow-lift" />
         </div>
       )}
       {preview.kind === 'other' && (

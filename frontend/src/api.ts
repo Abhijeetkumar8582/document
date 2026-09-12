@@ -230,7 +230,7 @@ export interface RecordUpdate {
 export const ENGINE_LABEL: Record<Engine, string> = {
   text: 'Text layer',
   google_docai: 'Google Document AI',
-  llm_vision: 'Gemini vision',
+  llm_vision: 'Local LLM Cloud',
   ocr: 'Local OCR',
 }
 
@@ -251,6 +251,11 @@ export const API_BASE = ((import.meta.env.VITE_API_BASE as string | undefined) ?
 /** Absolute URL for an API path. */
 export function url(path: string): string {
   return `${API_BASE}${path}`
+}
+
+/** Server-issued links: S3 ones are already absolute, local signed ones are API-relative. */
+export function absolute(u: string): string {
+  return /^https?:\/\//i.test(u) ? u : url(u)
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -328,7 +333,7 @@ export const api = {
   uploadToStorage: (presigned: Presigned, file: File, onProgress?: (pct: number) => void) =>
     new Promise<void>((resolve, reject) => {
       const xhr = new XMLHttpRequest()
-      xhr.open('POST', presigned.url)
+      xhr.open('POST', absolute(presigned.url))
       xhr.upload.onprogress = (e) => {
         if (e.lengthComputable && onProgress) onProgress(Math.round((e.loaded / e.total) * 100))
       }
@@ -346,7 +351,15 @@ export const api = {
           reject(new ApiError(xhr.status, message))
         }
       }
-      xhr.onerror = () => reject(new ApiError(0, presigned.backend === 's3' ? 'The bucket refused the upload. Check its CORS rules allow POST from this origin.' : 'The server could not be reached.'))
+      xhr.onerror = () =>
+        reject(
+          new ApiError(
+            0,
+            presigned.backend === 's3'
+              ? `The bucket refused the upload from ${window.location.origin}. Add that origin to the bucket's CORS rule (CORS_ORIGINS in backend/.env, then restart), or check the server's AWS credentials.`
+              : 'The server could not be reached.',
+          ),
+        )
       const form = new FormData()
       for (const [k, v] of Object.entries(presigned.fields)) form.append(k, v)
       form.append('file', file)
@@ -387,6 +400,16 @@ export const api = {
   batch: (id: number) => request<Batch>(`/api/batches/${id}`),
   batchJobs: (id: number, params: Record<string, string | number | undefined> = {}) =>
     request<Page<Job>>(`/api/batches/${id}/jobs?${qs(params)}`),
+  /** Every job in a batch, however many: walks the pages so a 5,000-file batch is shown in full. */
+  allBatchJobs: async (id: number, status?: string): Promise<Job[]> => {
+    const out: Job[] = []
+    for (let page = 1; page < 200; page++) {
+      const p = await request<Page<Job>>(`/api/batches/${id}/jobs?${qs({ status, page, page_size: 500 })}`)
+      out.push(...p.items)
+      if (out.length >= p.total || p.items.length === 0) break
+    }
+    return out
+  },
   queueSummary: () => request<QueueSummary>('/api/batches/summary'),
   retryBatch: (id: number) => request<Batch>(`/api/batches/${id}/retry`, { method: 'POST' }),
   cancelBatch: (id: number) => request<Batch>(`/api/batches/${id}/cancel`, { method: 'POST' }),

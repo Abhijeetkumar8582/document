@@ -5,7 +5,7 @@ records. Every upload has its text read by the best available engine, its studen
 is filed in a register you can search, sort, review, correct, report on, and export the original from.
 
 ```
-backend/    FastAPI + SQLAlchemy + SQLite. pdfplumber, Google Document AI, Gemini vision, optional Tesseract.
+backend/    FastAPI + SQLAlchemy + SQLite. pdfplumber, Google Document AI, Local LLM Cloud, optional Tesseract.
 frontend/   React 19 + TypeScript + Vite + Tailwind
 ```
 
@@ -45,7 +45,7 @@ step-by-step note of what was tried.
 | --- | --- | --- | --- |
 | 1 | **Text layer** (pdfplumber, pypdf) | The PDF has embedded text. Free and exact. DOCX and TXT always land here. | Text layer |
 | 2 | **Google Document AI** | The file is a scan or image and Document AI is configured. The result is kept only if its mean token confidence is at least `DOCAI_MIN_CONFIDENCE` (default 70%). Form fields and tables are used when the processor returns them. | Google Document AI · 85% |
-| 3 | **Gemini vision** (`gemini-2.5-flash`) | Document AI is missing, failed, or came in under the threshold. Each page is rendered to an image and sent in its own call with a strict JSON schema; pages are merged. | Gemini vision · gemini-2.5-flash |
+| 3 | **Local LLM Cloud** (`gemini-2.5-flash`) | Document AI is missing, failed, or came in under the threshold. Each page is rendered to an image and sent in its own call with a strict JSON schema; pages are merged. | Local LLM Cloud · gemini-2.5-flash |
 | 4 | **Local OCR** (Tesseract) | Neither cloud engine is configured but Tesseract is installed. | Local OCR |
 
 If none of steps 2 to 4 is available, a scan is rejected with a message listing what was tried.
@@ -99,6 +99,13 @@ finishes with every file in a terminal state, either filed or listed with a reas
   same sweep runs at startup.
 - `WORKER_CONCURRENCY` sets how many files run in parallel. Keep it at 1 or 2 when batches are scan-heavy so the
   vision model stays inside its rate limit.
+
+Capacity, measured with `python scripts/load_test.py 1000` (text transcripts, local storage, one laptop):
+1,000 files uploaded in 4 s, the batch created in 1 s, and all 1,000 filed in 21 s with two workers while the API
+stayed responsive. Scanned pages are bound by the cloud engines instead: roughly 3 to 5 s per page for Document AI
+and 5 to 10 s for Gemini, so a thousand scans take one to three hours at `WORKER_CONCURRENCY=2`. Raise it for
+scan-heavy batches as far as your Document AI and Gemini quotas allow. ZIPs are unpacked one member at a time, so
+memory stays flat regardless of archive size; the per-archive cap is `MAX_ZIP_ENTRIES` (2,000).
 
 The full design, including the state machine, failure table and how to scale workers onto separate machines, is in
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). `python scripts/bulk_smoke.py` exercises the queue end to end against

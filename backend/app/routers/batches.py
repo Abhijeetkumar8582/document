@@ -6,12 +6,13 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session, selectinload
 
 from .. import audit, models, schemas, worker
+from ..config import settings
 from ..database import get_db
 from ..services import queue
 
 router = APIRouter(prefix="/api", tags=["batches"])
 
-MAX_FILE_BYTES = 25 * 1024 * 1024
+MAX_FILE_BYTES = settings.max_upload_bytes
 
 
 def _batch_out(db: Session, b: models.Batch) -> schemas.BatchOut:
@@ -34,20 +35,21 @@ def _batch_out(db: Session, b: models.Batch) -> schemas.BatchOut:
 
 
 @router.post("/batches", response_model=schemas.BatchOut, status_code=202)
-async def create_batch(
+def create_batch(
     request: Request,
     files: list[UploadFile],
     mode: str = Query("auto", pattern="^(auto|text|google_docai|llm_vision|ocr)$"),
     name: str = Query(""),
     db: Session = Depends(get_db),
 ):
+    # Plain `def`: hashing and storage puts are blocking work and belong in a worker thread.
     incoming: list[queue.Incoming] = []
     for f in files:
-        data = await f.read()
+        data = f.file.read()
         if not data:
             continue
         if len(data) > MAX_FILE_BYTES and not (f.filename or "").lower().endswith(".zip"):
-            raise HTTPException(413, f"{f.filename} is larger than 25 MB.")
+            raise HTTPException(413, f"{f.filename} is larger than {MAX_FILE_BYTES // (1024 * 1024)} MB.")
         incoming.append(queue.Incoming(file_name=f.filename or "upload", content_type=f.content_type, data=data))
     if not incoming:
         raise HTTPException(400, "No files were received.")
@@ -179,7 +181,8 @@ def retry_job(job_id: int, request: Request, db: Session = Depends(get_db)):
         raise HTTPException(404, "Job not found")
     if job.status not in ("dead", "cancelled", "failed"):
         raise HTTPException(409, f"Job is {job.status}; only dead, failed or cancelled jobs can be retried.")
-    queue.retry(db, job)
+    if not queue.retry(db, job):
+        raise HTTPException(409, "A worker picked this job up just now; it is already running.")
     audit.log(db, request, "job_retry", job.record_id, f"job #{job.id} ({job.file_name}) requeued")
     db.commit()
     worker.pool.nudge()

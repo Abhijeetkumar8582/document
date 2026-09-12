@@ -11,7 +11,7 @@ const STAGE_LABEL: Record<string, string> = {
   'text layer': 'Reading text layer',
   'google document ai': 'Google Document AI',
   'rendering pages': 'Rendering pages',
-  'gemini vision': 'Gemini vision',
+  'gemini vision': 'Local LLM Cloud',
   'local ocr': 'Local OCR',
   parsing: 'Extracting fields',
   filed: 'Filed',
@@ -38,9 +38,32 @@ export function AnalysisOverlay() {
 
   useEffect(() => {
     if (!session) return
-    const onKey = (e: KeyboardEvent) => e.key === 'Escape' && analysis.closeOverlay()
+    // Move focus into the dialog, keep Tab inside it, and give it back on close.
+    const before = document.activeElement as HTMLElement | null
+    const panel = document.getElementById('analysis-dialog')
+    const focusables = () => Array.from(panel?.querySelectorAll<HTMLElement>('button, a[href], input, [tabindex]:not([tabindex="-1"])') ?? []).filter((el) => !el.hasAttribute('disabled'))
+    focusables()[0]?.focus()
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') analysis.closeOverlay()
+      if (e.key === 'Tab') {
+        const els = focusables()
+        if (!els.length) return
+        const first = els[0]
+        const last = els[els.length - 1]
+        if (e.shiftKey && document.activeElement === first) {
+          e.preventDefault()
+          last.focus()
+        } else if (!e.shiftKey && document.activeElement === last) {
+          e.preventDefault()
+          first.focus()
+        }
+      }
+    }
     window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
+    return () => {
+      window.removeEventListener('keydown', onKey)
+      before?.focus?.()
+    }
   }, [session])
 
   if (!session) return null
@@ -71,7 +94,7 @@ function Overlay({ session }: { session: Session }) {
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-ink/60 p-4 backdrop-blur-sm" role="dialog" aria-modal="true" aria-label={headline}>
-      <div className="settle flex max-h-[92vh] w-full max-w-3xl flex-col overflow-hidden rounded-lg border border-line bg-paper-2 shadow-lift">
+      <div id="analysis-dialog" className="settle flex max-h-[92vh] w-full max-w-3xl flex-col overflow-hidden rounded-lg border border-line bg-paper-2 shadow-lift">
         <div className="flex items-start gap-4 border-b border-line px-6 py-4">
           <div className="min-w-0 flex-1">
             <div className="eyebrow">{session.name}</div>

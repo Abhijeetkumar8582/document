@@ -1,5 +1,5 @@
 import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom'
-import { LayoutGrid, Files, UploadCloud, Search, ScrollText, Loader2 } from 'lucide-react'
+import { LayoutGrid, Files, UploadCloud, Search, ScrollText, Loader2, Workflow } from 'lucide-react'
 import { useEffect, useState, useSyncExternalStore } from 'react'
 import { analysis } from './lib/analysis'
 import { AnalysisOverlay } from './components/AnalysisOverlay'
@@ -9,6 +9,7 @@ const nav = [
   { to: '/records', label: 'Records', icon: Files },
   { to: '/upload', label: 'Upload', icon: UploadCloud },
   { to: '/audit', label: 'Audit log', icon: ScrollText },
+  { to: '/how-it-works', label: 'How it works', icon: Workflow },
 ]
 
 export default function App() {
@@ -31,6 +32,11 @@ export default function App() {
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
   }, [onRecords, navigate])
+
+  // Keep the box in step with the URL, so a filtered link or "Clear" shows the real query.
+  useEffect(() => {
+    setQ(new URLSearchParams(location.search).get('q') ?? '')
+  }, [location.search])
 
   // Arriving via Ctrl+K from another page: land with the search focused.
   useEffect(() => {
@@ -103,6 +109,7 @@ export default function App() {
             <Search size={15} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
             <input
               id="global-search"
+              aria-label="Search records"
               value={q}
               onChange={(e) => setQ(e.target.value)}
               placeholder="Search by student, ID, school…"

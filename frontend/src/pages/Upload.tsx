@@ -57,7 +57,7 @@ export default function Upload() {
   }
 
   const modes: { value: Mode; label: string; hint: string; icon: typeof Wand2; ready: boolean }[] = [
-    { value: 'auto', label: 'Auto', hint: 'Text layer first. Scans go to Document AI, then the vision model.', icon: Wand2, ready: true },
+    { value: 'auto', label: 'Auto', hint: 'Text layer first. Scans go to Document AI, then Local LLM Cloud.', icon: Wand2, ready: true },
     { value: 'text', label: 'Text layer', hint: 'Only read embedded text. Fast and exact for digital PDFs.', icon: FileText, ready: true },
     {
       value: 'google_docai',
@@ -68,7 +68,7 @@ export default function Upload() {
     },
     {
       value: 'llm_vision',
-      label: 'Gemini vision',
+      label: 'Local LLM Cloud',
       hint: engines ? `${engines.llm_vision.model}, one call per page.` : 'One call per page.',
       icon: Sparkles,
       ready: engines?.llm_vision.ready ?? false,

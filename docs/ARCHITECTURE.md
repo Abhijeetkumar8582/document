@@ -26,7 +26,7 @@ flowchart LR
     subgraph Engines
         TL[Text layer]
         GD[Google Document AI]
-        LV[Gemini vision]
+        LV[Local LLM Cloud]
         OCR[Tesseract]
     end
     UI -- multipart, ZIP ok --> EP
@@ -164,7 +164,7 @@ The single-process design runs comfortably to a few thousand files a day. When i
 - **Workers as separate processes:** run `python -m app.worker_main` on N machines pointed at the same database and a
   shared `uploads/` (NFS, or S3 with the paths swapped for keys). The API stops starting its own pool. The lease and
   janitor logic already assumes workers may be anywhere.
-- **Concurrency per engine:** Gemini vision is rate-limited per API key, so keep `WORKER_CONCURRENCY` low (1 to 2) for
+- **Concurrency per engine:** Local LLM Cloud is rate-limited per API key, so keep `WORKER_CONCURRENCY` low (1 to 2) for
   scan-heavy batches, or add a per-engine semaphore. Text-layer batches can run 8+ wide on one box.
 - **Live updates:** the UI polls every 2 seconds, which is cheap and works through any proxy. If you need push,
   put a Server-Sent Events endpoint over the same batch query; nothing in the workers changes.

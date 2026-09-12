@@ -21,6 +21,8 @@ class Settings:
     google_project: str | None = os.getenv("GOOGLE_DOCAI_PROJECT_ID")
     google_location: str = os.getenv("GOOGLE_DOCAI_LOCATION", "us")
     google_processor: str | None = os.getenv("GOOGLE_DOCAI_PROCESSOR_ID")
+    # Optional: pin a specific processor version (e.g. "pretrained-ocr-v2.0-2023-06-02"); blank uses the default.
+    google_processor_version: str | None = os.getenv("GOOGLE_DOCAI_PROCESSOR_VERSION") or None
     google_credentials: str | None = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
     # Accept a Document AI result only when its mean token confidence reaches this.
     docai_min_confidence: float = _float("DOCAI_MIN_CONFIDENCE", 0.70)
@@ -60,12 +62,15 @@ def _ensure_signing_secret() -> str:
     import secrets
 
     data_dir = Path(__file__).resolve().parent.parent / "data"
-    data_dir.mkdir(exist_ok=True)
+    data_dir.mkdir(exist_ok=True, mode=0o700)
     p = data_dir / ".signing_secret"
     if p.exists():
         return p.read_text().strip()
     secret = secrets.token_hex(32)
-    p.write_text(secret)
+    # Owner-only: anyone who can read this can mint valid document links.
+    fd = os.open(p, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "w") as fh:
+        fh.write(secret)
     return secret
 
 

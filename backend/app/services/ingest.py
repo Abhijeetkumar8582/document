@@ -1,15 +1,15 @@
 """Turn bytes into a filed Record. Shared by the single-upload endpoint and the bulk workers."""
 from __future__ import annotations
 
+import hashlib
 import json
-from typing import Callable
+from collections.abc import Callable
 
 from sqlalchemy.orm import Session
 
 from .. import models
 from . import extractor, parser, pipeline, storage
 
-UPLOAD_DIR = storage.UPLOAD_DIR
 
 Progress = Callable[[str, int, int], None]  # (stage, done, total)
 
@@ -58,6 +58,7 @@ def build_record(
         file_type=extractor.detect_kind(filename, content_type),
         file_size=len(data),
         stored_path=stored_name,
+        sha256=hashlib.sha256(data).hexdigest(),
         page_count=extraction.page_count,
         extraction_method=processed.engine,
         engine_confidence=processed.engine_confidence,

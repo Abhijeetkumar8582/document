@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session, selectinload
 from .. import audit, models, schemas
 from ..config import settings
 from ..database import get_db
-from ..services import ingest, parser, pipeline, storage
+from ..services import ingest, parser, pipeline, queue, storage
 
 router = APIRouter(prefix="/api", tags=["records"])
 
@@ -54,6 +54,13 @@ def _recompute(rec: models.Record) -> None:
         if all(s.max_marks for s in with_marks):
             rec.max_marks = round(sum(s.max_marks or 0 for s in with_marks), 2)
             rec.percentage = round(rec.total_marks / rec.max_marks * 100, 2) if rec.max_marks else None
+        else:
+            rec.max_marks = None
+            rec.percentage = None
+    else:
+        rec.total_marks = None
+        rec.max_marks = None
+        rec.percentage = None
     graded = [s for s in rec.subjects if s.credits and parser.grade_points_for(s.grade) is not None]
     if graded and rec.grade_scale == "4.0":
         cred = sum(s.credits or 0 for s in graded)
@@ -73,17 +80,18 @@ def engines():
 
 
 @router.post("/records/upload", response_model=schemas.RecordDetail, status_code=201)
-async def upload_record(
+def upload_record(
     request: Request,
     file: UploadFile,
     mode: str = Query("auto", pattern="^(auto|text|google_docai|llm_vision|ocr)$"),
     db: Session = Depends(get_db),
 ):
-    data = await file.read()
+    # Plain `def`: extraction can take minutes, so FastAPI runs this in a worker thread instead of the event loop.
+    data = file.file.read()
     if not data:
         raise HTTPException(400, "The uploaded file is empty.")
     if len(data) > MAX_BYTES:
-        raise HTTPException(413, "Files must be 25 MB or smaller.")
+        raise HTTPException(413, f"Files must be {MAX_BYTES // (1024 * 1024)} MB or smaller.")
     filename = file.filename or "upload"
     try:
         rec = ingest.build_record(data, filename, file.content_type, mode)
@@ -237,6 +245,8 @@ def update_record(record_id: int, payload: schemas.RecordUpdate, request: Reques
     rec = _load(db, record_id)
     changes = payload.model_dump(exclude_unset=True)
     subjects = changes.pop("subjects", None)
+    if changes.get("review_status", "x") is None:
+        changes.pop("review_status")  # NOT NULL column; "clear" is not a valid state
     changed = [k for k, v in changes.items() if getattr(rec, k) != v]
     for key, value in changes.items():
         setattr(rec, key, value)
@@ -279,6 +289,7 @@ def bulk_delete(body: BulkDeleteRequest, request: Request, db: Session = Depends
         except Exception:
             pass
         audit.log(db, request, "delete", rec.id, f"{rec.file_name} ({rec.student_name or 'unnamed'}) via bulk delete")
+        queue.detach_record(db, rec.id)
         db.delete(rec)
     db.commit()
     return BulkDeleteResponse(deleted=len(rows), missing=[i for i in ids if i not in found])
@@ -292,6 +303,7 @@ def delete_record(record_id: int, request: Request, db: Session = Depends(get_db
     except storage.StorageError:
         pass
     audit.log(db, request, "delete", rec.id, f"{rec.file_name} ({rec.student_name or 'unnamed'})")
+    queue.detach_record(db, rec.id)
     db.delete(rec)
     db.commit()
 

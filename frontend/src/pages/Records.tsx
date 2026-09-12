@@ -16,7 +16,7 @@ export default function Records() {
   const engine = (ENGINES.includes(params.get('engine') as Engine) ? params.get('engine') : '') as '' | Engine
   const sort = (SORTS.includes(params.get('sort') as SortKey) ? params.get('sort') : 'created_at') as SortKey
   const order = params.get('order') === 'asc' ? 'asc' : 'desc'
-  const page = Math.max(1, Number(params.get('page') ?? 1))
+  const page = Math.max(1, Math.floor(Number(params.get('page'))) || 1)
 
   const [data, setData] = useState<RecordPage | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -31,6 +31,7 @@ export default function Records() {
   useEffect(() => {
     let live = true
     setLoading(true)
+    setError(null)
     api
       .list({ q, status, engine, sort, order, page, page_size: PAGE_SIZE })
       .then((d) => live && setData(d))
@@ -40,6 +41,21 @@ export default function Records() {
       live = false
     }
   }, [q, status, engine, sort, order, page, reload])
+
+  // Deleting the last rows of the last page leaves the page number past the end: step back.
+  const pages = useMemo(() => (data ? Math.max(1, Math.ceil(data.total / PAGE_SIZE)) : 1), [data])
+  useEffect(() => {
+    if (data && data.total > 0 && page > pages) {
+      const next = new URLSearchParams(params)
+      next.set('page', String(pages))
+      setParams(next, { replace: true })
+    }
+  }, [data, page, pages, params, setParams])
+
+  // The confirmation belongs to a selection; an emptied selection cancels it.
+  useEffect(() => {
+    if (selected.size === 0) setConfirming(false)
+  }, [selected.size])
 
   const pageIds = useMemo(() => (data ? data.items.map((r) => r.id) : []), [data])
   const allOnPage = pageIds.length > 0 && pageIds.every((id) => selected.has(id))
@@ -83,7 +99,10 @@ export default function Records() {
 
   const set = (patch: Record<string, string | undefined>) => {
     const next = new URLSearchParams(params)
-    for (const [k, v] of Object.entries(patch)) (v ? next.set(k, v) : next.delete(k))
+    for (const [k, v] of Object.entries(patch)) {
+      if (v) next.set(k, v)
+      else next.delete(k)
+    }
     if (!('page' in patch)) next.delete('page')
     setParams(next)
   }
@@ -93,7 +112,6 @@ export default function Records() {
     else set({ sort: key, order: key === 'student_name' || key === 'institution' ? 'asc' : 'desc' })
   }
 
-  const pages = useMemo(() => (data ? Math.max(1, Math.ceil(data.total / PAGE_SIZE)) : 1), [data])
 
   return (
     <div className="mx-auto max-w-6xl">
