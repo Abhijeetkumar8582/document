@@ -259,7 +259,18 @@ export function absolute(u: string): string {
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(url(path), init)
+  let res: Response
+  try {
+    res = await fetch(url(path), init)
+  } catch {
+    // fetch() rejects without a status for network failures and CORS refusals alike.
+    throw new ApiError(
+      0,
+      API_BASE
+        ? `Could not reach the API at ${API_BASE} from ${window.location.origin}. Either it is down, or it refused this origin (CORS). Check the backend is running and, if CORS_ORIGINS is set in its .env, that it includes ${window.location.origin}.`
+        : 'Could not reach the API. Is the backend running?',
+    )
+  }
   const type = res.headers.get('content-type') ?? ''
   if (type.includes('text/html')) {
     throw new ApiError(

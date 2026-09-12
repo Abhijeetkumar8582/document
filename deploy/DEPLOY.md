@@ -62,11 +62,12 @@ sudo systemctl restart registrar       # after editing backend/.env
 ## Serving on port 80 or HTTPS later
 
 Put nginx in front and proxy everything to `127.0.0.1:8000`. Because the API serves the frontend, a single
-`location / { proxy_pass http://127.0.0.1:8000; }` block is enough. Add the new origin (`http://15.207.14.33`
-or your domain) to `CORS_ORIGINS` in `backend/.env` and to the bucket's CORS rule.
+`location / { proxy_pass http://127.0.0.1:8000; }` block is enough.
 
 ## Running the frontend separately (optional)
 
-If you ever host the frontend somewhere else (S3 website, Amplify, nginx on another port), tell it where the API
-is before building: put `VITE_API_BASE=http://15.207.14.33:8000` in `frontend/.env`, run `npm run build`, and add
-the frontend's origin to `CORS_ORIGINS` in `backend/.env` and to the bucket CORS rule.
+If you host the frontend somewhere else (another port such as 3000, an S3 website, Amplify), tell it where the API
+is before building: put `VITE_API_BASE=http://15.207.14.33:8000` in `frontend/.env` and run `npm run build`.
+The API accepts calls from any origin by default, and the bucket's CORS rule is applied by the API on startup,
+so no other configuration is needed. When you add authentication later, set `CORS_ORIGINS` in `backend/.env`
+to the frontend's exact origin so the API stops accepting other sites.

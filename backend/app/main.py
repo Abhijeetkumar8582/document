@@ -33,15 +33,12 @@ app = FastAPI(
     version="3.0.0",
 )
 
-# Browser origins allowed to call this API. Comma-separated in CORS_ORIGINS; add the deployed frontend's origin there.
-_origins = [
-    o.strip()
-    for o in os.getenv(
-        "CORS_ORIGINS",
-        "http://localhost:5173,http://127.0.0.1:5173,http://localhost:8000,http://127.0.0.1:8000,http://15.207.14.33,http://15.207.14.33:8000",
-    ).split(",")
-    if o.strip()
-]
+# Browser origins allowed to call this API.
+# Default: any origin. There is no login or cookie session yet, so an origin allow-list adds no protection and
+# only breaks the app whenever the frontend is served from a new address. Once authentication is added, set
+# CORS_ORIGINS to the exact frontend origin(s), comma-separated, and this becomes a real allow-list.
+_cors_env = os.getenv("CORS_ORIGINS", "").strip()
+_origins = [o.strip() for o in _cors_env.split(",") if o.strip()] if _cors_env else ["*"]
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_origins,
@@ -49,6 +46,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+logging.getLogger("registrar").info("CORS: %s", "any origin" if _origins == ["*"] else ", ".join(_origins))
 
 app.include_router(records.router)
 app.include_router(audit_log.router)
