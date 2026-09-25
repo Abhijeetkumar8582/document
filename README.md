@@ -79,6 +79,16 @@ Fall/Spring/Summer terms, and "Student ID". When a transcript does not print a G
 grade points, with pass/fail, withdrawn and incomplete grades excluded from the denominator. Marks-based sheets
 (percentage scale) are still supported and shown with their own columns.
 
+Real transcript layouts are handled, not just "Label: value" lines: column headers with the values on the next
+row (`STUDENT NAME  STUDENT ID  DATE OF BIRTH`), inline `STUDENT Liam Carter STUDENT ID WMU-…` runs, per-term
+sections (`FALL 2024`, `SPRING 2025`) whose years become the academic-year range, cumulative summary rows, and
+diagonal watermarks that leak single letters into the text. Column headings, page counters and footers are
+ignored rather than filed as courses.
+
+When a digital document still defeats the regex parser (fewer than `LLM_ASSIST_BELOW`, default 75%, of fields
+found), the already-extracted text is sent to Gemini in one text-only call to structure it. The record keeps its
+"Text layer" tag and the processing notes say the model helped.
+
 Extraction is heuristic: each record carries a field-confidence score and is stamped **Verified** (75% and above) or
 **Needs review**. Every field and course row can be edited in the UI, and the status can be flipped by hand.
 

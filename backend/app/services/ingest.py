@@ -8,7 +8,8 @@ from collections.abc import Callable
 from sqlalchemy.orm import Session
 
 from .. import models
-from . import extractor, parser, pipeline, storage
+from ..config import settings
+from . import extractor, llm_vision, parser, pipeline, storage
 
 
 Progress = Callable[[str, int, int], None]  # (stage, done, total)
@@ -48,6 +49,33 @@ def build_record(
     if progress:
         progress("parsing", 0, 1)
     parsed = parser.parse(extraction)
+
+    # The regex parser handles common layouts. When it comes up short on a text-layer document and Gemini is
+    # available, let the model structure the text it already has: one cheap call, no image rendering.
+    assist_at = settings.llm_assist_below
+    if (
+        assist_at > 0
+        and processed.engine in ("text", "ocr", "google_docai")
+        and not extraction.structured
+        and parsed.confidence < assist_at
+        and settings.gemini_ready
+        and extraction.text.strip()
+    ):
+        try:
+            if progress:
+                progress("llm structuring", 0, 1)
+            res = llm_vision.structure_text(extraction.text)
+            extraction.structured = res.fields
+            extraction.structured_subjects = res.subjects
+            before = parsed.confidence
+            parsed = parser.parse(extraction)
+            processed.notes.append(
+                f"Local LLM Cloud ({res.model}) structured the text because only {round(before * 100)}% of fields were found; "
+                f"now {round(parsed.confidence * 100)}%, {len(parsed.subjects)} course row(s)."
+            )
+            processed.model = res.model
+        except llm_vision.VisionError as exc:
+            processed.notes.append(f"Local LLM Cloud could not help with the text layer: {exc}")
 
     if stored_name is None:
         stored_name = storage.new_key(filename)

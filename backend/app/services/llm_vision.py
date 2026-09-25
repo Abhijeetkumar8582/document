@@ -473,6 +473,47 @@ def _parse_json(raw: str) -> dict:
     return data if isinstance(data, dict) else {}
 
 
+TEXT_PROMPT_SUFFIX = """
+
+The page has already been transcribed. Instead of an image you are given its plain text below, between the
+markers. Fill the same JSON structure from that text. Set "text" to the transcription exactly as given.
+
+=== BEGIN PAGE TEXT ===
+{text}
+=== END PAGE TEXT ==="""
+
+
+def structure_text(text: str) -> VisionResult:
+    """Ask Gemini to fill the record schema from text that was already extracted (no image, one cheap call).
+
+    Used when a digital PDF's layout defeats the regex parser: column headers without colons, watermark
+    letters inside rows, unusual orderings. The transcription is not re-done, only structured.
+    """
+    if not settings.gemini_ready:
+        raise VisionError("GEMINI_API_KEY is not set, so the model cannot structure the text.")
+    try:
+        from google import genai
+        from google.genai import types
+    except ImportError as exc:
+        raise VisionError("The google-genai package is not installed.") from exc
+    client = genai.Client(api_key=settings.gemini_api_key)
+    config = types.GenerateContentConfig(temperature=0, response_mime_type="application/json")
+    clipped = text[:60_000]
+    try:
+        resp = client.models.generate_content(
+            model=settings.gemini_model, contents=[PROMPT + TEXT_PROMPT_SUFFIX.format(text=clipped)], config=config
+        )
+        payload = _parse_json(resp.text or "")
+    except VisionError:
+        raise
+    except Exception as exc:
+        raise VisionError(f"Gemini failed to structure the text: {exc}") from exc
+    subjects = payload.pop("subjects", None) or []
+    payload.pop("text", None)
+    page = VisionPage(index=0, text=text, fields=payload, subjects=[s for s in subjects if isinstance(s, dict)])
+    return VisionResult(text=text, fields=payload, subjects=page.subjects, pages=[page], model=settings.gemini_model)
+
+
 def read_pages(images: list, on_page: Callable[[int, int], None] | None = None) -> VisionResult:
     if not settings.gemini_ready:
         raise VisionError("GEMINI_API_KEY is not set, so the vision model cannot be used.")

@@ -31,6 +31,10 @@ class Settings:
     gemini_api_key: str | None = os.getenv("GEMINI_API_KEY")
     gemini_model: str = os.getenv("GEMINI_VISION_MODEL", "gemini-2.5-flash")
 
+    # When the regex parser finds fewer than this share of fields on a text-layer document, ask Gemini to
+    # structure the already-extracted text (one text-only call, no image). 0 disables.
+    llm_assist_below: float = _float("LLM_ASSIST_BELOW", 0.75)
+
     # A page whose text layer is shorter than this is treated as a scan.
     min_text_chars_per_page: int = int(os.getenv("MIN_TEXT_CHARS_PER_PAGE", "80"))
     render_dpi: int = int(os.getenv("RENDER_DPI", "170"))

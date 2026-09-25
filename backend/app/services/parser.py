@@ -132,6 +132,239 @@ META_LINE = re.compile(
     re.I,
 )
 LABELLED_VALUE = re.compile(r"^[A-Za-z .()/&-]{2,40}\s*[:=]\s*\S+$")
+
+# --- Layout noise -------------------------------------------------------------------
+# Diagonal watermarks ("SAMPLE", "CONFIDENTIAL") come out of the text layer as one letter per line and as stray
+# capitals dropped into course rows. Footers, page counters and column headings are not data either.
+WATERMARK_LINE = re.compile(r"^\W?[A-Z]\W?$")
+NOISE_LINE = re.compile(
+    r"(?i)\bpage\s+\d+\s*(?:of|/)\s*\d+\b|^\s*page\s+\d+\b|this is a (?:fictional|sample)|sample document|not issued by|"
+    r"^\s*course\s+title\b|^\s*(?:code|subject)\s+(?:title|name)\b|record type\s*:|^\s*office of the|^\s*registrar notes?\b|"
+    r"\bnon-official\b|grading scale\b|"
+    r"^\s*(?:term|semester)\s+(?:credits|gpa)\b|^\s*cumulative\s+academic\s+summary\b|security feature|signature"
+)
+CODE_START_RE = re.compile(r"^[A-Z]{2,6}\s?-?\d{2,5}[A-Z]{0,2}\b")
+TERM_HEADER_RE = re.compile(r"^\s*((?:fall|spring|summer|winter|autumn)\s+(?:19|20)\d{2})\s*(?:term|semester)?\s*$", re.I)
+ROMAN_RE = re.compile(r"^(?:I|II|III|IV|V|VI|VII|VIII|IX|X)$")
+
+# --- Columnar headers ---------------------------------------------------------------
+# Many US transcripts print a row of labels and the values on the line below, with no colons:
+#     STUDENT NAME        STUDENT ID        DATE OF BIRTH
+#     Liam Carter         WMU-2024-22891    March 27, 2005
+# Each label maps to a field and a value shape; longest label phrase wins when scanning a line.
+COL_LABELS: list[tuple[str, str]] = sorted(
+    [
+        ("name of student", "student_name"), ("student name", "student_name"), ("student", "student_name"), ("name", "student_name"),
+        ("student id number", "roll_number"), ("student id", "roll_number"), ("student number", "roll_number"), ("id number", "roll_number"),
+        ("roll number", "roll_number"), ("roll no", "roll_number"), ("registration number", "roll_number"), ("registration no", "roll_number"),
+        ("enrollment number", "roll_number"), ("enrolment number", "roll_number"), ("student no", "roll_number"), ("id", "roll_number"),
+        ("date of birth", "dob"), ("birth date", "dob"), ("dob", "dob"),
+        ("academic program", "program"), ("degree program", "program"), ("program of study", "program"), ("program", "program"),
+        ("programme", "program"), ("degree", "program"), ("course of study", "program"),
+        ("major", "major"), ("minor", "ignore"), ("concentration", "ignore"),
+        ("academic unit", "ignore"), ("college", "ignore"), ("school", "ignore"), ("department", "ignore"), ("campus", "ignore"),
+        ("admission term", "term"), ("entry term", "term"), ("matriculation term", "term"), ("term", "term"), ("semester", "term"),
+        ("academic status", "result_status"), ("academic standing", "result_status"), ("standing", "result_status"),
+        ("status", "result_status"), ("result", "result_status"),
+        ("advisor", "ignore"), ("degree progress", "ignore"), ("expected graduation", "ignore"), ("class level", "ignore"),
+        ("total attempted credits", "attempted"), ("attempted credits", "attempted"), ("credits attempted", "attempted"),
+        ("total earned credits", "credits_earned"), ("earned credits", "credits_earned"), ("credits earned", "credits_earned"),
+        ("total credits", "credits_earned"), ("credit hours earned", "credits_earned"),
+        ("cumulative gpa", "gpa"), ("overall gpa", "gpa"), ("cum gpa", "gpa"), ("cgpa", "gpa"), ("gpa", "gpa"),
+        ("cumulative grade point average", "gpa"), ("grade point average", "gpa"),
+        ("total quality points", "ignore"), ("quality points", "ignore"),
+        ("academic year", "academic_year"), ("session", "academic_year"),
+    ],
+    key=lambda kv: -len(kv[0]),
+)
+ID_TOKEN_RE = re.compile(r"^(?:[A-Z]{1,6}[-/]?\d[\w\-/]{2,}|\d{4,}|[A-Z0-9]{2,}[-/][A-Z0-9\-/]{2,})$", re.I)
+DATE_RE = re.compile(
+    r"\b(?:(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\.?\s+\d{1,2},?\s+(?:19|20)\d{2}"
+    r"|\d{1,2}\s+(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\.?,?\s+(?:19|20)\d{2}"
+    r"|\d{1,2}[/.-]\d{1,2}[/.-](?:19|20)?\d{2}|(?:19|20)\d{2}-\d{2}-\d{2})\b",
+    re.I,
+)
+STATUS_RE = re.compile(
+    r"\b(good\s+standing|dean'?s\s+list|honou?rs?\s+list|academic\s+probation|probation|graduated|in\s+good\s+standing|"
+    r"pass(?:ed)?|fail(?:ed)?|promoted|qualified|withheld|distinction|first\s+class|second\s+class|active|enrolled|suspended)\b",
+    re.I,
+)
+TERM_VALUE_RE = re.compile(r"\b((?:fall|spring|summer|winter|autumn)\s+(?:19|20)\d{2})\b", re.I)
+NUM_TOKEN_RE = re.compile(r"\b\d{1,3}(?:\.\d{1,3})?\b")
+
+
+def _match_labels(line: str) -> list[tuple[int, int, str, str]]:
+    """Every label phrase found in the line, as (start, end, phrase, field), non-overlapping, longest first."""
+    low = line.lower()
+    found: list[tuple[int, int, str, str]] = []
+    taken = [False] * len(line)
+    for phrase, field_name in COL_LABELS:
+        # A single trailing letter is tolerated ("DEGREE PROGRESSA"): watermarks glue themselves onto headings.
+        for m in re.finditer(r"(?<![a-z])" + re.escape(phrase) + r"(?![a-z]{2})", low):
+            if any(taken[m.start() : m.end()]):
+                continue
+            found.append((m.start(), m.end(), phrase, field_name))
+            for i in range(m.start(), m.end()):
+                taken[i] = True
+    return sorted(found)
+
+
+def _is_header_line(line: str) -> list[tuple[int, int, str, str]] | None:
+    """A line made only of label phrases (plus separators) is a column header for the line below it."""
+    labels = _match_labels(line)
+    if not labels:
+        return None
+    rest = line
+    for s, e, _, _ in sorted(labels, reverse=True):
+        rest = rest[:s] + " " + rest[e:]
+    rest = re.sub(r"(?<![A-Za-z])[A-Z](?![A-Za-z])", " ", rest)  # stray watermark capitals
+    if re.search(r"[A-Za-z0-9]", rest):
+        return None
+    return labels
+
+
+def _pull(pattern: re.Pattern, text: str) -> tuple[str | None, str]:
+    m = pattern.search(text)
+    if not m:
+        return None, text
+    return m.group(0).strip(), (text[: m.start()] + " " + text[m.end() :]).strip()
+
+
+def _columnar_fields(lines: list[str]) -> tuple[dict[str, str], list[int]]:
+    """Read label-row / value-row pairs and inline "LABEL value LABEL value" lines. Returns fields and consumed line indexes."""
+    out: dict[str, str] = {}
+    used: list[int] = []
+
+    def assign(fields_in_order: list[str], value_line: str) -> None:
+        rest = value_line
+        pending = list(fields_in_order)
+        # Shaped values first, wherever they sit on the line.
+        if "dob" in pending:
+            _, rest = _pull(DATE_RE, rest)
+            pending.remove("dob")
+        if "term" in pending:
+            v, rest = _pull(TERM_VALUE_RE, rest)
+            if v:
+                out.setdefault("term", v.title())
+            pending.remove("term")
+        if "result_status" in pending:
+            v, rest = _pull(STATUS_RE, rest)
+            if v:
+                out.setdefault("result_status", _title(v))
+            pending.remove("result_status")
+        if "roll_number" in pending:
+            for tok in rest.split():
+                if ID_TOKEN_RE.match(tok) and not DATE_RE.match(tok):
+                    out.setdefault("roll_number", tok)
+                    rest = rest.replace(tok, " ", 1)
+                    break
+            pending.remove("roll_number")
+        numeric = [f for f in pending if f in ("attempted", "credits_earned", "gpa")]
+        if numeric:
+            nums = NUM_TOKEN_RE.findall(rest)
+            for f, n in zip(numeric, nums, strict=False):
+                out.setdefault(f, n)
+            for f in numeric:
+                pending.remove(f)
+            rest = NUM_TOKEN_RE.sub(" ", rest)
+        if "academic_year" in pending:
+            m = re.search(r"(?:19|20)\d{2}\s*[-/]\s*(?:19|20)?\d{2}|(?:19|20)\d{2}", rest)
+            if m:
+                out.setdefault("academic_year", m.group(0).replace(" ", ""))
+                rest = rest.replace(m.group(0), " ", 1)
+            pending.remove("academic_year")
+        rest = _clean(re.sub(r"\s{2,}", "  ", rest))
+        free = [f for f in pending if f != "ignore"]
+        if not rest or not free:
+            return
+        if "student_name" in free:
+            # A name is the leading run of capitalised words.
+            m = re.match(r"((?:[A-Z][a-zA-Z'\-.]+\s?){1,5})", rest)
+            if m:
+                out.setdefault("student_name", _clean(m.group(1)))
+                rest = rest[m.end() :].strip()
+            free.remove("student_name")
+        if "program" in free and "major" in free:
+            # "Bachelor of Arts in Psychology  Psychology": the major usually repeats a word from the program.
+            words = rest.split()
+            major = None
+            for k in (3, 2, 1):
+                tail = words[-k:]
+                if len(words) > k and any(w.lower() in (x.lower() for x in words[:-k]) for w in tail):
+                    major = " ".join(tail)
+                    break
+            if major:
+                out.setdefault("major", major)
+                rest = " ".join(words[: -len(major.split())])
+            out.setdefault("program", _clean(rest))
+            return
+        if "program" in free:
+            out.setdefault("program", _clean(rest.split("  ")[0]))
+        elif "major" in free:
+            out.setdefault("major", _clean(rest.split("  ")[0]))
+
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        header = _is_header_line(line)
+        if header and i + 1 < len(lines):
+            nxt = lines[i + 1]
+            if not _is_header_line(nxt) and not TERM_HEADER_RE.match(nxt):
+                assign([f for _, _, _, f in header], nxt)
+                used += [i, i + 1]
+                i += 2
+                continue
+        # Inline form: uppercase labels with mixed-case values between them.
+        labels = [lab for lab in _match_labels(line) if line[lab[0] : lab[1]].isupper()]
+        if labels and not line.isupper():
+            for idx, (_s, e, _, field_name) in enumerate(labels):
+                end = labels[idx + 1][0] if idx + 1 < len(labels) else len(line)
+                value = line[e:end].strip(" :-|")
+                if value:
+                    assign([field_name], value)
+            used.append(i)
+        i += 1
+    return out, used
+
+
+def _prepare_lines(text: str) -> list[str]:
+    """Drop watermark letters, footers and page counters; keep everything that could be data."""
+    out: list[str] = []
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or WATERMARK_LINE.match(line) or NOISE_LINE.search(line):
+            continue
+        out.append(line)
+    return out
+
+
+def _strip_stray_letters(tokens: list[str]) -> list[str]:
+    """Remove single capital letters a watermark dropped into a row, keeping roman numerals inside the name."""
+    cleaned: list[str] = []
+    seen_number = False
+    grade_taken = False
+    for idx, tok in enumerate(tokens):
+        if _to_num(tok) is not None:
+            if idx > 0:  # a leading serial number or the digits of a course code are not marks
+                seen_number = True
+            cleaned.append(tok)
+            continue
+        if len(tok) == 1 and tok.isalpha() and tok.isupper():
+            nxt = tokens[idx + 1] if idx + 1 < len(tokens) else None
+            if not seen_number:
+                # Before any number: keep a roman numeral that ends the title, drop everything else.
+                if ROMAN_RE.match(tok) and (nxt is None or _to_num(nxt) is not None or (len(nxt) == 1 and nxt.isupper())):
+                    cleaned.append(tok)
+                continue
+            # After the credits figure the first grade-like letter is the grade; any later single letter is noise.
+            if GRADE_RE.match(tok) and not grade_taken:
+                grade_taken = True
+                cleaned.append(tok)
+            continue
+        if seen_number and GRADE_RE.match(tok):
+            grade_taken = True
+        cleaned.append(tok)
+    return cleaned
 # When one line carries two fields ("Name: Sam Okafor   Student ID: NG-2210"), cut before the next label. Only
 # real label words count, so a surname followed by spaces is never mistaken for a label.
 NEXT_LABEL_RE = re.compile(
@@ -167,6 +400,16 @@ def redact_pii(text: str) -> tuple[str, bool]:
     redacted, n = SSN_LABELLED_RE.subn(lambda mt: mt.group(0)[: mt.start(1) - mt.start(0)] + "[SSN redacted]", text)
     redacted, n2 = SSN_RE.subn("[SSN redacted]", redacted)
     redacted, m = DOB_LINE_RE.subn(lambda mt: mt.group(1) + "[redacted]", redacted)
+    # Column layout: a "DATE OF BIRTH" heading with the date on the following line.
+    out_lines = redacted.splitlines()
+    for i in range(len(out_lines) - 1):
+        if re.search(r"(?i)\b(?:date\s+of\s+birth|d\.?\s?o\.?\s?b\.?|birth\s*date)\b", out_lines[i]) and ":" not in out_lines[i]:
+            for j in range(i + 1, min(i + 4, len(out_lines))):
+                if DATE_RE.search(out_lines[j]):
+                    out_lines[j], k = DATE_RE.subn("[redacted]", out_lines[j], count=1)
+                    m += k
+                    break
+    redacted = "\n".join(out_lines)
     # The vision model redacts at the source and writes "[redacted]"; count that too.
     return redacted, bool(n or n2 or m or "[redacted]" in text.lower())
 
@@ -202,7 +445,7 @@ def grade_points_for(grade: str | None) -> float | None:
 
 def _parse_subject_line(line: str, cells: list[str] | None = None) -> ParsedSubject | None:
     raw = line.strip()
-    if not raw or NOISE_ROW.match(raw):
+    if not raw or NOISE_ROW.match(raw) or NOISE_LINE.search(raw) or TERM_HEADER_RE.match(raw):
         return None
     if cells:
         tokens = [c.strip() for c in cells if c.strip()]
@@ -226,16 +469,32 @@ def _parse_subject_line(line: str, cells: list[str] | None = None) -> ParsedSubj
     if code is None and len(tokens) >= 3 and re.fullmatch(r"[A-Z]{2,6}", tokens[0]) and re.fullmatch(r"\d{2,4}[A-Z]?", tokens[1]):
         code = f"{tokens[0]} {tokens[1]}"
         tokens = tokens[2:]
+    if not cells:
+        tokens = _strip_stray_letters(tokens)
+    grade_before_number: str | None = None
     for tok in tokens:
         num = _to_num(tok)
         if code is None and CODE_RE.match(tok):
             code = tok
         elif num is not None:
             numbers.append(num)
-        elif GRADE_RE.match(tok) and len(tok) <= 4 and grade is None and words:
-            grade = tok.upper()
+        elif GRADE_RE.match(tok) and len(tok) <= 4 and words:
+            # US rows put the grade after the credits ("3.0 A- 11.1"); a grade-like token before any number
+            # is kept only if nothing better follows.
+            if numbers and grade is None:
+                grade = tok.upper()
+            elif not numbers and grade_before_number is None:
+                grade_before_number = tok.upper()
+            elif grade is not None and len(tok) == 1:
+                continue  # second single letter after the grade: watermark
+            else:
+                words.append(tok)
         else:
             words.append(tok)
+    if grade is None and grade_before_number is not None:
+        grade = grade_before_number
+    elif grade is not None and grade_before_number is not None and len(grade_before_number) > 1:
+        words.append(grade_before_number)  # e.g. "A+" inside a title is rare; keep the text rather than lose it
 
     first = raw.split()[0]
     if len(numbers) >= 2 and numbers[0] < 30 and numbers[0].is_integer() and first == str(int(numbers[0])):
@@ -248,6 +507,12 @@ def _parse_subject_line(line: str, cells: list[str] | None = None) -> ParsedSubj
     if not numbers and not grade:
         return None
     if not re.search(r"[A-Za-z]{2,}", name):
+        return None
+    # Without a course code, a row needs a grade or at least two figures to count. "FALL 2023" and
+    # "Richmond, Virginia 1" have one number and no grade, and they are not courses.
+    if code is None and grade is None and len(numbers) < 2:
+        return None
+    if code is None and not grade and numbers and all(n >= 1900 for n in numbers):
         return None
 
     marks = max_marks = credits = points = None
@@ -289,16 +554,31 @@ def _subjects_from_tables(tables: list[list[list[str | None]]]) -> list[ParsedSu
     return found
 
 
-def _subjects_from_text(text: str) -> list[ParsedSubject]:
+def _subjects_from_text(lines: list[str], skip: set[int] | None = None) -> list[ParsedSubject]:
     found: list[ParsedSubject] = []
-    for line in text.splitlines():
+    for i, line in enumerate(lines):
+        if skip and i in skip:
+            continue
         if re.search(r"\d", line) and re.search(r"[A-Za-z]{3,}", line):
-            if META_LINE.search(line) or LABELLED_VALUE.match(line.strip()):
+            # A line that opens with a course code is a course, whatever words follow ("College Algebra").
+            if not CODE_START_RE.match(line) and (META_LINE.search(line) or LABELLED_VALUE.match(line.strip()) or _is_header_line(line)):
                 continue
             parsed = _parse_subject_line(line)
             if parsed:
                 found.append(parsed)
     return found
+
+
+def _terms_in(lines: list[str]) -> list[str]:
+    """Term headers in document order, e.g. ["Fall 2024", "Spring 2025"]."""
+    seen: list[str] = []
+    for line in lines:
+        m = TERM_HEADER_RE.match(line)
+        if m:
+            t = m.group(1).title()
+            if t not in seen:
+                seen.append(t)
+    return seen
 
 
 def _subjects_from_structured(rows: list[dict]) -> list[ParsedSubject]:
@@ -389,7 +669,24 @@ def parse(extraction: Extraction) -> ParsedRecord:
     for field_name, patterns in LABELS.items():
         setattr(rec, field_name, _find_label(text, patterns))
 
-    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    lines = _prepare_lines(text)
+    # Column-header layouts (label row above value row, or LABEL value LABEL value) fill in what the
+    # colon-based labels above could not.
+    cols, used_lines = _columnar_fields(lines)
+    for f in ("student_name", "roll_number", "program", "term", "result_status", "academic_year"):
+        if not getattr(rec, f) and cols.get(f):
+            setattr(rec, f, cols[f])
+    if cols.get("major") and rec.program and cols["major"].lower() not in rec.program.lower():
+        rec.program = f"{rec.program}, {cols['major']}"
+    if cols.get("gpa"):
+        rec.gpa = _to_num(cols["gpa"])
+    if cols.get("credits_earned"):
+        rec.credits_earned = _to_num(cols["credits_earned"])
+    terms = _terms_in(lines)
+    if terms:
+        rec.term = terms[0] if len(terms) == 1 else f"{terms[0]} to {terms[-1]}"
+        years = sorted({int(t.split()[-1]) for t in terms})
+        rec.academic_year = str(years[0]) if len(years) == 1 else f"{years[0]}-{years[-1]}"
     if not rec.institution:
         for line in lines[:12]:
             if INSTITUTION_HINTS.search(line) and len(line) < 100 and ":" not in line:
@@ -417,13 +714,13 @@ def parse(extraction: Extraction) -> ParsedRecord:
         rec.student_name = None
 
     m = CUM_GPA_RE.search(text) or GPA_RE.search(text)
-    if m:
+    if m and rec.gpa is None:
         rec.gpa = float(m.group(1))
     m = CREDITS_RE.search(text)
-    if m:
+    if m and rec.credits_earned is None:
         rec.credits_earned = float(m.group(1))
     m = RESULT_RE.search(text)
-    if m:
+    if m and not rec.result_status:
         rec.result_status = _title(m.group(1))
     elif rec.result_status and len(rec.result_status) > 40:
         rec.result_status = None
@@ -437,38 +734,47 @@ def parse(extraction: Extraction) -> ParsedRecord:
     if len(subjects) < 1:
         subjects = _subjects_from_tables(extraction.tables)
     if len(subjects) < 2:
-        subjects = _subjects_from_text(text)
-    rec.subjects = _dedupe(subjects)[:60]
+        subjects = _subjects_from_text(lines, set(used_lines))
+    rec.subjects = _dedupe(subjects)[:120]
 
     if extraction.structured:
         _apply_structured(rec, extraction.structured)
 
-    # Aggregates
+    # Which grading world is this? Decide first, so marks totals are not summed on a 4.0 transcript.
     with_marks = [s for s in rec.subjects if s.marks_obtained is not None]
     lettered = [s for s in rec.subjects if s.grade and (s.grade in GRADE_POINTS or s.grade in NO_POINT_GRADES)]
-    if with_marks:
-        rec.total_marks = rec.total_marks or round(sum(s.marks_obtained or 0 for s in with_marks), 2)
-        if all(s.max_marks for s in with_marks):
-            rec.max_marks = rec.max_marks or round(sum(s.max_marks or 0 for s in with_marks), 2)
-    m = TOTAL_RE.search(text)
-    if m and not extraction.structured:
-        rec.total_marks = float(m.group(1))
-        if m.group(2):
-            rec.max_marks = float(m.group(2))
-    if rec.total_marks and rec.max_marks and rec.percentage is None:
-        rec.percentage = round(rec.total_marks / rec.max_marks * 100, 2)
-    m = PERCENT_RE.search(text)
-    if m and 0 < float(m.group(1)) <= 100 and not extraction.structured:
-        rec.percentage = float(m.group(1))
-
-    # US 4.0 scale: GPA from credits and grade points when the sheet did not print one.
     if not rec.grade_scale:
-        if lettered and len(lettered) >= max(1, len(rec.subjects) // 2) and not with_marks:
+        if re.search(r"(?i)4\.0{1,3}\s+(?:grading\s+)?scale|/\s*4\.0{1,3}\b", text) or (
+            lettered and len(lettered) >= max(1, (len(rec.subjects) + 1) // 2) and len(with_marks) <= len(rec.subjects) // 4
+        ):
             rec.grade_scale = "4.0"
         elif with_marks:
             rec.grade_scale = "percentage"
         elif rec.subjects:
             rec.grade_scale = "other"
+
+    # Aggregates
+    if rec.grade_scale != "4.0":
+        if with_marks:
+            rec.total_marks = rec.total_marks or round(sum(s.marks_obtained or 0 for s in with_marks), 2)
+            if all(s.max_marks for s in with_marks):
+                rec.max_marks = rec.max_marks or round(sum(s.max_marks or 0 for s in with_marks), 2)
+        m = TOTAL_RE.search(text)
+        if m and not extraction.structured:
+            rec.total_marks = float(m.group(1))
+            if m.group(2):
+                rec.max_marks = float(m.group(2))
+        if rec.total_marks and rec.max_marks and rec.percentage is None:
+            rec.percentage = round(rec.total_marks / rec.max_marks * 100, 2)
+        m = PERCENT_RE.search(text)
+        if m and 0 < float(m.group(1)) <= 100 and not extraction.structured:
+            rec.percentage = float(m.group(1))
+    else:
+        # Stray marks on a 4.0 transcript are watermark or credit figures misread as marks; drop them.
+        for s in rec.subjects:
+            if s.grade and s.credits is None and s.marks_obtained is not None and s.marks_obtained <= 20:
+                s.credits, s.marks_obtained, s.max_marks = s.marks_obtained, None, None
+        rec.total_marks = rec.max_marks = rec.percentage = None
     if rec.grade_scale == "4.0":
         graded = [s for s in rec.subjects if s.credits and grade_points_for(s.grade) is not None]
         if graded:
